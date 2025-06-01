@@ -1,0 +1,79 @@
+const express = require("express");
+const router = express.Router();
+const db = require("../config/db"); // Database connection
+
+// Define the search route
+router.get("/", async (req, res) => {
+  console.log('Search endpoint hit');
+  try {
+    const { query } = req.query;
+    if (!query) {
+      return res.status(400).json({ error: "Query parameter is required" });
+    }
+
+    // Enforce minimum 5-character restriction for search queries
+    if (query.length < 5) {
+      return res.status(400).json({ error: "Please enter at least 5 characters to search." });
+    }
+
+    console.log("query:", query);
+    const searchTerm = `%${query}%`;
+    console.log(`🔍 Searching for: "${query}"`);
+
+    // Find matching tables from searchable_keywords using JSON query
+    const keywordQuery = `
+      SELECT table_name, JSON_UNQUOTE(JSON_EXTRACT(config, '$.columnNames')) AS columnNames,
+             JSON_UNQUOTE(JSON_EXTRACT(config, '$.defaultcolumn')) AS defaultcolumn 
+      FROM searchable_keywords 
+      WHERE JSON_CONTAINS(config->'$.keywords', JSON_QUOTE(?))
+    `;
+    console.log("Keyword Query:", keywordQuery);
+    const [keywordResults] = await db.execute(keywordQuery, [query]);
+    console.log("Keyword Results:", keywordResults);
+
+    const searchResults = [];
+
+    if (keywordResults.length === 0) {
+      console.log("🔹 No keyword mapping found. Fallback to default tables.");
+    }
+
+// Fallback to default tables if no results are found
+    if (searchResults.length === 0) {
+      console.log("🔹 No results found. Searching in default tables.");
+      const defaultQuery = `
+        SELECT table_name, JSON_UNQUOTE(JSON_EXTRACT(config, '$.columnNames')) AS columnNames 
+        FROM searchable_keywords WHERE JSON_UNQUOTE(JSON_EXTRACT(config, '$.defaultcolumn')) = '1'
+      `;
+      console.log("Default Query:", defaultQuery);
+      const [defaultResults] = await db.execute(defaultQuery);
+      for (let { table_name, columnNames } of defaultResults) {
+        console.log(`🔎 Searching in default table: ${table_name}`);
+        const columns = JSON.parse(columnNames);
+        if (columns.length === 0) continue;
+        const filteredColumns = columns.join(", ");
+        const sql = `SELECT ${filteredColumns}, '${table_name}' AS table_name 
+                     FROM ${table_name} 
+                     WHERE CONVERT(CONCAT_WS(' ', ${filteredColumns}) USING utf8mb4) LIKE LOWER(?)`;
+        const [results] = await db.execute(sql, [searchTerm]);
+        if (results.length > 0) {
+          searchResults.push(...results);
+        }
+      }
+
+
+ // For results from mst_prod, mst_whats_new, and mst_resource, generate relative URLs.
+
+    searchResults.forEach(result => {
+      if (result.table_name === 'mst_prod' && result.prod_id) {
+        result.url_path = `/my-products/${result.prod_id}`;
+        console.log(`Generated relative URL for product (mst_prod): ${result.url_path}`);
+      } else if (result.table_name === 'mst_whats_new' && result.whats_new_id) {
+        result.url_path = `/whats-new/${result.whats_new_id}`;
+        console.log(`Generated relative URL for whats new (mst_whats_new): ${result.url_path}`);
+      } else if (result.table_name === 'mst_resource' && (result.resource_id || result['RESOURCE ID'] || result['RESOURCE_ID'])) {
+        const resId = result.resource_id || result['RESOURCE ID'] || result['RESOURCE_ID'];
+        result.url_path = `/all-resources/${resId}`;
+        console.log(`Generated relative URL for resource (mst_resource): ${result.url_path}`);
+      }
+    }); 
+ 
